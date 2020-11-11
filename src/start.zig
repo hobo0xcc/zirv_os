@@ -4,7 +4,7 @@ const uart = @import("uart.zig");
 
 // ## start()
 // - Will make CPU mode into supervisor and enable exceptions and interrupts.
-export fn start() void {
+pub export fn start() void {
     // mret will change the mode to supervisor.
     var mstatus = csr.readMstatus();
     mstatus &= ~csr.MSTATUS_MPP;
