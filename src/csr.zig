@@ -86,3 +86,42 @@ pub fn writeSie(val: u64) void {
         : [val] "r" (val)
     );
 }
+
+pub fn readStvec() u64 {
+    return asm volatile ("csrr %[ret], stvec"
+        : [ret] "=r" (-> u64)
+    );
+}
+
+pub fn writeStvec(val: u64) void {
+    asm volatile ("csrw stvec, %[val]"
+        :
+        : [val] "r" (val)
+    );
+}
+
+pub fn readScause() u64 {
+    return asm volatile ("csrr %[ret], scause"
+        : [ret] "=r" (-> u64)
+    );
+}
+
+pub fn writeScause(val: u64) void {
+    asm volatile ("csrw scause, %[val]"
+        :
+        : [val] "r" (val)
+    );
+}
+
+pub fn readSepc() u64 {
+    return asm volatile ("csrr %[ret], sepc"
+        : [ret] "=r" (-> u64)
+    );
+}
+
+pub fn writeSepc(val: u64) void {
+    asm volatile ("csrw sepc, %[val]"
+        :
+        : [val] "r" (val)
+    );
+}
