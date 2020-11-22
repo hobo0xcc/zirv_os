@@ -9,6 +9,7 @@ pub export fn start() void {
     var mstatus = csr.readMstatus();
     mstatus &= ~csr.MSTATUS_MPP;
     mstatus |= csr.MSTATUS_MPP_S;
+    mstatus |= csr.MSTATUS_SPIE;
     csr.writeMstatus(mstatus);
 
     // mret will return to main.

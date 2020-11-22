@@ -4,6 +4,7 @@ pub const MSTATUS_MPP_S: u64 = 0b01 << 11;
 pub const MSTATUS_MPP_M: u64 = 0b11 << 11;
 pub const MSTATUS_SPIE: u64 = 0b1 << 5;
 pub const MSTATUS_MIE: u64 = 0b1 << 3;
+pub const MSTATUS_SIE: u64 = 0b1 << 1;
 
 pub const SIE_SEIE: u64 = 0b1 << 9;
 pub const SIE_STIE: u64 = 0b1 << 5;
