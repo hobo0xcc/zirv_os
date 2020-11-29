@@ -1,4 +1,5 @@
 comptime {
+    // RISC-Vが最初にジャンプする関数
     asm (
         \\ .text
         \\ .globl _entry

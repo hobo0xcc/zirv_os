@@ -17,6 +17,9 @@ $(BIN):
 qemu: $(BIN)
 	qemu-system-riscv64 -machine virt -bios none -kernel $^ -m 128M -smp 1 -nographic
 
+qemu-gdb: $(BIN)
+	riscv64-unknown-elf-gdb -x script.gdb
+
 rve: $(BIN)
 	~/d/src/rve/bin/rve $^
 
