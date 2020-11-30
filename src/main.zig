@@ -21,13 +21,15 @@ fn compare(a: usize, b: usize) bool {
 }
 
 pub fn goodbye() !void {
+    try proc.sleepProc(100);
     try uart.out.print("Goodbye, world!\n", .{});
     try uart.out.print("さよなら世界!\n", .{});
     _ = try proc.suspendProc(proc.getPid());
-    // while (true) {}
+    while (true) {}
 }
 
 pub fn hello() !void {
+    try proc.sleepProc(10);
     try uart.out.print("Hello, world!\n", .{});
     try uart.out.print("こんにちは世界!\n", .{});
     _ = try proc.suspendProc(proc.getPid());
@@ -42,9 +44,5 @@ pub fn main() !void {
     var pid2 = try proc.makeDefaultProc(a, @ptrToInt(goodbye), "goodbye");
     _ = try proc.resumeProc(pid1);
     _ = try proc.resumeProc(pid2);
-    // var name = try proc.procName(a, "hello");
-    // var pid = try proc.createProc(a, @ptrToInt(hello), 0x1000, 10, name, 0);
-    // _ = try proc.resumeProc(pid);
-    try uart.out.print("returned!\n", .{});
     while (true) {}
 }

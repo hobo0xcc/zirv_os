@@ -11,6 +11,19 @@ pub const Pid = usize;
 pub const Prio = usize;
 pub const PriorityQueue = std.PriorityQueue(*ProcEntry);
 pub const PrioU64 = std.PriorityQueue(u64);
+pub const DeltaList = std.SinglyLinkedList(ProcDelay);
+
+pub const ProcDelay = struct {
+    pid: Pid,
+    delay: usize,
+
+    pub fn init() ProcDelay {
+        return ProcDelay{
+            .pid = 0,
+            .delay = 0,
+        };
+    }
+};
 
 // プロセスの状態
 pub const ProcStatus = enum {
@@ -18,6 +31,7 @@ pub const ProcStatus = enum {
     Curr, // 実行中
     Ready, // 実行可能（実行準備完了）
     Susp,
+    Sleep,
 };
 
 // プロセスのエントリ
@@ -93,6 +107,11 @@ const Defer = packed struct {
     attempt: bool,
 };
 
+const DeferStatus = enum {
+    DEFER_START,
+    DEFER_STOP,
+};
+
 pub const NPROC: usize = 64; // プロセスの最大数
 pub const PNAMELEN: usize = 16; // プロセスの名前の最大文字数
 pub const NULLPROC: usize = 0; // Nullプロセスのpid
@@ -106,6 +125,8 @@ var readylist: PriorityQueue = undefined;
 var currpid: Pid = 0;
 var prcount: usize = 0;
 var defer_proc = Defer{ .ndefers = 0, .attempt = false };
+pub var sleapq = DeltaList{};
+pub var proc_delay_tab = [_]DeltaList.Node{DeltaList.Node{ .next = null, .data = ProcDelay.init() }} ** NPROC;
 
 pub fn prioCompare(a: *ProcEntry, b: *ProcEntry) bool {
     return a.prprio > b.prprio;
@@ -174,6 +195,7 @@ pub fn getPid() Pid {
 
 pub fn suspendProc(pid: Pid) !usize {
     var mask = trap.disable();
+    defer trap.restore(mask);
     if (isBadPid(pid) or (pid == NULLPROC)) {
         trap.restore(mask);
         return KernelError.SYSERR;
@@ -205,12 +227,12 @@ pub fn suspendProc(pid: Pid) !usize {
     }
 
     var prio = proc.prprio;
-    trap.restore(mask);
     return prio;
 }
 
 pub fn createProc(allocator: *Allocator, func: u64, stk_size: usize, prio: usize, name: []u8, nargs: usize) !Pid {
     var mask = trap.disable();
+    defer trap.restore(mask);
     var stack_len = stk_size;
     if (stack_len < MINSTK) {
         stack_len = MINSTK;
@@ -236,13 +258,12 @@ pub fn createProc(allocator: *Allocator, func: u64, stk_size: usize, prio: usize
     util.memcpy(@ptrCast([*]u8, &proc.prname[0]), name, name.len);
     proc.prparent = getPid();
 
-    trap.restore(mask);
     return pid;
 }
 
 pub fn resumeProc(pid: Pid) !usize {
     var mask = trap.disable();
-    try uart.out.print("mask: {x}\n", .{mask});
+    defer trap.restore(mask);
     if (isBadPid(pid)) {
         trap.restore(mask);
         return KernelError.SYSERR;
@@ -256,8 +277,61 @@ pub fn resumeProc(pid: Pid) !usize {
 
     var prio = proc.prprio;
     try ready(pid);
-    trap.restore(mask);
     return prio;
+}
+
+pub fn sleepProc(delay: u64) !void {
+    var mask = trap.disable();
+    defer trap.restore(mask);
+
+    var pid = getPid();
+    proc_delay_tab[pid].data = ProcDelay{
+        .pid = pid,
+        .delay = delay,
+    };
+    var prev: ?*DeltaList.Node = null;
+    var curr = sleapq.first;
+    var sum: usize = 0;
+    while (curr) |proc_delay| : ({
+        prev = proc_delay;
+        curr = proc_delay.next;
+    }) {
+        sum += proc_delay.data.delay;
+        if (sum > proc_delay_tab[pid].data.delay) {
+            break;
+        }
+    }
+
+    if (prev) |insert_to| {
+        proc_delay_tab[pid].data.delay -= insert_to.data.delay;
+        if (curr) |after| {
+            after.data.delay -= proc_delay_tab[pid].data.delay;
+        }
+        insert_to.insertAfter(&proc_delay_tab[pid]);
+    } else {
+        if (sleapq.first) |first| {
+            first.data.delay -= proc_delay_tab[pid].data.delay;
+        }
+        proc_delay_tab[pid].next = sleapq.first;
+        sleapq.first = &proc_delay_tab[pid];
+    }
+
+    proctab[pid].prstate = ProcStatus.Sleep;
+    try resched();
+}
+
+pub fn wakeupProc() !void {
+    try resched_ctrl(DeferStatus.DEFER_START);
+    var pid = getPid();
+    while (sleapq.first) |node| {
+        if (node.data.delay == 0) {
+            try ready(sleapq.popFirst().?.data.pid);
+        } else {
+            break;
+        }
+    }
+
+    try resched_ctrl(DeferStatus.DEFER_STOP);
 }
 
 pub fn ready(pid: Pid) !void {
@@ -314,6 +388,9 @@ pub fn resched() !void {
 
     var old_proc = &proctab[currpid];
     if (old_proc.prstate == ProcStatus.Curr) {
+        if (readylist.len == 0) {
+            return;
+        }
         if (old_proc.prprio > readylist.peek().?.prprio) {
             return;
         }
@@ -326,5 +403,28 @@ pub fn resched() !void {
     currpid = new_proc.prpid;
     new_proc.prstate = ProcStatus.Curr;
 
+    // try uart.out.print("Context switch: {} -> {}\n", .{ old_proc.prpid, new_proc.prpid });
     swtch(@ptrToInt(&old_proc.ctx), @ptrToInt(&new_proc.ctx));
+}
+
+pub fn resched_ctrl(defer_status: DeferStatus) !void {
+    switch (defer_status) {
+        .DEFER_START => {
+            if (defer_proc.ndefers == 0) {
+                defer_proc.attempt = false;
+            }
+            defer_proc.ndefers += 1;
+            return;
+        },
+        .DEFER_STOP => {
+            if (defer_proc.ndefers <= 0) {
+                return KernelError.SYSERR;
+            }
+            defer_proc.ndefers -= 1;
+            if ((defer_proc.ndefers == 0) and defer_proc.attempt) {
+                try resched();
+            }
+            return;
+        },
+    }
 }

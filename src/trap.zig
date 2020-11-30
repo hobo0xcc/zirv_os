@@ -2,6 +2,7 @@ const csr = @import("csr.zig");
 const uart = @import("uart.zig");
 const memlayout = @import("memlayout.zig");
 const timer = @import("timer.zig");
+const proc = @import("proc.zig");
 
 comptime {
     asm (
@@ -145,6 +146,8 @@ comptime {
     );
 }
 
+pub const SSI: u64 = 0x1;
+
 pub extern fn kernelvec() void;
 pub extern fn timervec() void;
 
@@ -152,21 +155,39 @@ pub export var timer_scratch = [_]u64{0} ** 5;
 
 pub export fn timertrap() void {
     var mcause = csr.readMcause();
-    try uart.out.print("Timer Trap occured: mepc: {x}\n", .{csr.readMepc()});
+    // try uart.out.print("Timer Trap occured: mepc: {x}\n", .{csr.readMepc()});
     var mtimecmp = @intToPtr(*u64, memlayout.CLINT_BASE + memlayout.CLINT_MTIMECMP);
     mtimecmp.* += timer.INTERVAL;
     csr.writeSip(csr.readSip() | csr.SIP_SSIP);
 }
 
+pub fn is_interrupt(cause: u64) bool {
+    return (cause & (0b1 << 63)) != 0;
+}
+
 pub export fn traphandler() void {
     var scause = csr.readScause();
-    try uart.out.print("Trap occured: {x}, sepc: {x}\n", .{ scause, csr.readSepc() });
+    // try uart.out.print("Trap occured: {x}, sepc: {x}\n", .{ scause, csr.readSepc() });
     var sip_cause = @as(u64, 0b1) << @intCast(u6, scause & ~(@as(u64, 0b1 << 63)));
     csr.writeSip(csr.readSip() & ~sip_cause);
     var return_pc = csr.readSepc();
     if ((scause & (0b1 << 63)) == 0) {
         return_pc += 4;
     }
+
+    if (is_interrupt(scause)) {
+        // Supervisor Software Interrupt
+        if ((scause & 0xffff) == SSI) {
+            return_pc = @ptrToInt(proc.resched);
+            if (proc.sleapq.first) |node| {
+                node.data.delay -= 1;
+                if (node.data.delay == 0) {
+                    proc.wakeupProc() catch {};
+                }
+            }
+        }
+    }
+
     csr.writeSepc(return_pc);
 }
 
