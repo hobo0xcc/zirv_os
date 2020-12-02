@@ -1,3 +1,3 @@
-- [ ] Timer interrupt to support preemption
-- [ ] An allocator for memory allocation in which the allocation size is less than one-page size
+- [x] Timer interrupt to support preemption
+- [x] An allocator for memory allocation in which the allocation size is less than one-page size
 - [ ] File System

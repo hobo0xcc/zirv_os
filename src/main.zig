@@ -33,13 +33,17 @@ pub fn hello() !void {
     try uart.out.print("Hello, world!\n", .{});
     try uart.out.print("こんにちは世界!\n", .{});
     _ = try proc.suspendProc(proc.getPid());
-    // while (true) {}
+    while (true) {}
 }
 
 pub fn main() !void {
     var kallocator = memalloc.KernelAllocator.init(riscv.HEAP_SIZE);
     var a = &kallocator.allocator;
     var env = try sysinit.init(a);
+    // var p = try a.alloc(u8, 5);
+    // var p2 = try a.alloc(u8, 5);
+    // var p3 = try a.alloc(u8, 4096);
+    // try uart.out.print("p: {*}, p2: {*}, p3: {*}\n", .{ &p[0], &p2[0], &p3[0] });
     var pid1 = try proc.makeDefaultProc(a, @ptrToInt(hello), "hello");
     var pid2 = try proc.makeDefaultProc(a, @ptrToInt(goodbye), "goodbye");
     _ = try proc.resumeProc(pid1);
