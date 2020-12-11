@@ -149,6 +149,19 @@ pub fn writeStvec(val: u64) void {
     );
 }
 
+pub fn readStval() u64 {
+    return asm volatile ("csrr %[ret], stval"
+        : [ret] "=r" (-> u64)
+    );
+}
+
+pub fn writeStval(val: u64) void {
+    asm volatile ("csrw stval, %[val]"
+        :
+        : [val] "r" (val)
+    );
+}
+
 pub fn readMtvec() u64 {
     return asm volatile ("csrr %[ret], mtvec"
         : [ret] "=r" (-> u64)

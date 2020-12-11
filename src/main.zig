@@ -9,6 +9,8 @@ const sysinit = @import("sysinit.zig");
 const spinlock = @import("spinlock.zig");
 const proc = @import("proc.zig");
 const kerror = @import("kerror.zig");
+const KernelError = kerror.KernelError;
+const virtio = @import("virtio.zig");
 const PriorityQueue = std.PriorityQueue(usize);
 const Allocator = std.mem.Allocator;
 const Exact = Allocator.Exact;
@@ -36,14 +38,28 @@ pub fn hello() !void {
     while (true) {}
 }
 
-pub fn main() !void {
+pub fn errorOccur() !void {
+    return KernelError.SYSERR;
+}
+
+pub fn main() !noreturn {
+    try uart.out.print("a0: {x}\n", .{asm volatile ("mv %[ret], a0"
+        : [ret] "=r" (-> u64)
+    )});
     var kallocator = memalloc.KernelAllocator.init(riscv.HEAP_SIZE);
     var a = &kallocator.allocator;
+    memalloc.a = a;
     var env = try sysinit.init(a);
-    // var p = try a.alloc(u8, 5);
-    // var p2 = try a.alloc(u8, 5);
-    // var p3 = try a.alloc(u8, 4096);
-    // try uart.out.print("p: {*}, p2: {*}, p3: {*}\n", .{ &p[0], &p2[0], &p3[0] });
+    var blk = try a.alloc(u8, 512);
+    try virtio.read(1, @ptrCast([*]u8, &blk[0]), 512, 0);
+    var cnt: usize = 0;
+    for (blk) |byte| {
+        cnt += 1;
+        try uart.out.print("{x:0>2} ", .{byte});
+        if (cnt % 16 == 0) {
+            try uart.out.print("\n", .{});
+        }
+    }
     var pid1 = try proc.makeDefaultProc(a, @ptrToInt(hello), "hello");
     var pid2 = try proc.makeDefaultProc(a, @ptrToInt(goodbye), "goodbye");
     _ = try proc.resumeProc(pid1);

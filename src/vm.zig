@@ -199,8 +199,11 @@ pub fn init(a: *Allocator) !*Table {
     try idMapRange(a, root, bss_start, bss_end, PTE_R | PTE_W);
     try idMapRange(a, root, text_start, text_end, PTE_R | PTE_X);
 
-    try map(a, root, 0x1000_0000, 0x1000_0000, PTE_R | PTE_W, 0);
+    try map(a, root, memlayout.UART_BASE, memlayout.UART_BASE, PTE_R | PTE_W, 0);
+    // try map(a, root, memlayout.VIRTIO_BASE, memlayout.VIRTIO_BASE, PTE_R | PTE_W, 0);
+    try idMapRange(a, root, memlayout.VIRTIO_BASE, memlayout.VIRTIO_BASE + memlayout.VIRTIO_SIZE, PTE_R | PTE_W);
     try idMapRange(a, root, memlayout.CLINT_BASE, memlayout.CLINT_BASE + memlayout.CLINT_SIZE, PTE_R | PTE_W);
+    try idMapRange(a, root, memlayout.PLIC_BASE, memlayout.PLIC_BASE + memlayout.PLIC_SIZE, PTE_R | PTE_W);
 
     const root_ppn = @ptrToInt(root) >> 12;
     const satp_val = 8 << 60 | root_ppn;

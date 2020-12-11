@@ -7,6 +7,8 @@ const memalloc = @import("memalloc.zig");
 const riscv = @import("riscv.zig");
 const timer = @import("timer.zig");
 const csr = @import("csr.zig");
+const plic = @import("plic.zig");
+const virtio = @import("virtio.zig");
 const Allocator = std.mem.Allocator;
 
 pub const KernelEnv = struct {
@@ -22,6 +24,8 @@ pub fn init(allocator: *Allocator) !KernelEnv {
     var root_table = try vm.init(allocator);
     try proc.init(allocator);
     try timer.init();
+    plic.init();
+    try virtio.init(allocator);
     return KernelEnv{
         .root_table = root_table,
         .allocator = allocator,

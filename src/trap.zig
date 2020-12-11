@@ -3,6 +3,9 @@ const uart = @import("uart.zig");
 const memlayout = @import("memlayout.zig");
 const timer = @import("timer.zig");
 const proc = @import("proc.zig");
+const plic = @import("plic.zig");
+const virtio = @import("virtio.zig");
+const panic = @import("panic.zig").panic;
 
 comptime {
     asm (
@@ -147,6 +150,7 @@ comptime {
 }
 
 pub const SSI: u64 = 0x1;
+pub const SEI: u64 = 0x9;
 
 pub extern fn kernelvec() void;
 pub extern fn timervec() void;
@@ -177,7 +181,7 @@ pub export fn traphandler() void {
 
     if (is_interrupt(scause)) {
         // Supervisor Software Interrupt
-        if ((scause & 0xffff) == SSI) {
+        if ((scause & 0xff) == SSI) {
             return_pc = @ptrToInt(proc.resched);
             if (proc.sleapq.first) |node| {
                 node.data.delay -= 1;
@@ -185,7 +189,14 @@ pub export fn traphandler() void {
                     proc.wakeupProc() catch {};
                 }
             }
+        } else if ((scause & 0xff) == SEI) {
+            const irq = plic.claim();
+            if (irq >= plic.VIRTIO_FIRST_IRQ and irq <= plic.VIRTIO_END_IRQ) {
+                virtio.interrupt(irq) catch {};
+            } else if (irq == plic.UART_IRQ) {}
         }
+    } else {
+        panic("Exception occured: cause: {x}, stval: {x}, sepc: {x}\n", .{ scause, csr.readStval(), csr.readSepc() });
     }
 
     csr.writeSepc(return_pc);
