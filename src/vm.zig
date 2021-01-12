@@ -29,6 +29,8 @@ extern const _bss_start: usize;
 extern const _bss_end: usize;
 extern const _end: usize;
 
+pub var root_page_table: *Table = undefined;
+
 pub const Table = packed struct {
     entries: [512]Entry,
 
@@ -137,6 +139,32 @@ pub fn unmap(a: *Allocator, root: *Table) void {
     }
 }
 
+pub fn virtAddrGetEntry(root: *Table, vaddr: usize) ?*Entry {
+    const vpn = [_]u64{
+        (vaddr >> 12) & 0x1ff,
+        (vaddr >> 21) & 0x1ff,
+        (vaddr >> 30) & 0x1ff,
+    };
+
+    var v = &root.entries[vpn[2]];
+    var i: usize = 2;
+    while (i >= 0) : (i -= 1) {
+        if (v.is_invalid()) {
+            break;
+        } else if (v.is_leaf()) {
+            const off_mask = (@as(usize, 1) << @as(u6, 12 + @intCast(u6, i) * 9)) - 1;
+            const vaddr_pgoff = vaddr & off_mask;
+            const addr = (v.get_entry() << 2) & ~off_mask;
+            return v;
+        }
+
+        const entry = @intToPtr([*]Entry, (v.get_entry() & ~@intCast(u64, 0x3ff)) << 2);
+        v = &entry[vpn[i - 1]];
+    }
+
+    return null;
+}
+
 pub fn virtToPhys(root: *Table, vaddr: usize) ?usize {
     const vpn = [_]u64{
         (vaddr >> 12) & 0x1ff,
@@ -160,6 +188,8 @@ pub fn virtToPhys(root: *Table, vaddr: usize) ?usize {
         v = &entry[vpn[i - 1]];
     }
 
+    try uart.out.print("virtToPhys: {}\n", .{i});
+
     return null;
 }
 
@@ -173,6 +203,23 @@ pub fn idMapRange(a: *Allocator, root: *Table, start: usize, end: usize, bits: u
     }
 }
 
+pub fn addrMapRange(a: *Allocator, root: *Table, vaddr: usize, paddr: usize, size: usize, bits: u64) !void {
+    var mem_remain: isize = @intCast(isize, size);
+    var curr_vaddr = vaddr & ~(@as(usize, 4096 - 1));
+    var curr_paddr = paddr & ~(@as(usize, 4096 - 1));
+    while (mem_remain > 0) : (mem_remain -= @intCast(isize, riscv.PAGE_SIZE)) {
+        try map(a, root, curr_vaddr, curr_paddr, bits, 0);
+        curr_vaddr += riscv.PAGE_SIZE;
+        curr_paddr += riscv.PAGE_SIZE;
+    }
+}
+
+pub fn makeSatp(page_table: *Table) u64 {
+    const root_ppn = @ptrToInt(page_table) >> 12;
+    const satp_val = 8 << 60 | root_ppn;
+    return satp_val;
+}
+
 pub fn init(a: *Allocator) !*Table {
     const text_start = @ptrToInt(&_text_start);
     const text_end = @ptrToInt(&_text_end);
@@ -184,32 +231,33 @@ pub fn init(a: *Allocator) !*Table {
     const bss_end = @ptrToInt(&_bss_end);
     const heap_start = @ptrToInt(&_end);
     const heap_end = @ptrToInt(&_end) + riscv.HEAP_SIZE;
+
     try uart.out.print("TEXT: 0x{x} -> 0x{x}\n", .{ text_start, text_end });
     try uart.out.print("RODATA: 0x{x} -> 0x{x}\n", .{ rodata_start, rodata_end });
     try uart.out.print("DATA: 0x{x} -> 0x{x}\n", .{ data_start, data_end });
     try uart.out.print("BSS: 0x{x} -> 0x{x}\n", .{ bss_start, bss_end });
     try uart.out.print("HEAP: 0x{x} -> 0x{x}\n", .{ heap_start, heap_end });
 
-    var root_table = try a.alignedAlloc(Table, 4096, 1); // &(try a.allocAdvanced(Table, 4096, 1, Exact.exact))[0];
+    var root_table = try a.allocAdvanced(Table, 4096, 1, Exact.exact);
     var root = &root_table[0];
 
     try idMapRange(a, root, heap_start, heap_end, PTE_R | PTE_W);
     try idMapRange(a, root, rodata_start, rodata_end, PTE_R | PTE_X);
     try idMapRange(a, root, data_start, data_end, PTE_R | PTE_W);
     try idMapRange(a, root, bss_start, bss_end, PTE_R | PTE_W);
-    try idMapRange(a, root, text_start, text_end, PTE_R | PTE_X);
+    try idMapRange(a, root, text_start, text_end, PTE_R | PTE_X | PTE_A);
 
     try map(a, root, memlayout.UART_BASE, memlayout.UART_BASE, PTE_R | PTE_W, 0);
-    // try map(a, root, memlayout.VIRTIO_BASE, memlayout.VIRTIO_BASE, PTE_R | PTE_W, 0);
     try idMapRange(a, root, memlayout.VIRTIO_BASE, memlayout.VIRTIO_BASE + memlayout.VIRTIO_SIZE, PTE_R | PTE_W);
     try idMapRange(a, root, memlayout.CLINT_BASE, memlayout.CLINT_BASE + memlayout.CLINT_SIZE, PTE_R | PTE_W);
     try idMapRange(a, root, memlayout.PLIC_BASE, memlayout.PLIC_BASE + memlayout.PLIC_SIZE, PTE_R | PTE_W);
 
-    const root_ppn = @ptrToInt(root) >> 12;
-    const satp_val = 8 << 60 | root_ppn;
+    const satp_val = makeSatp(root);
     asm volatile ("csrw satp, %[val]"
         :
         : [val] "r" (satp_val)
     );
+    asm volatile ("sfence.vma zero, zero");
+    root_page_table = root;
     return root;
 }

@@ -23,8 +23,11 @@ qemu-gdb: $(BIN) fs.img
 rve: $(BIN) fs.img
 	~/d/src/rve/bin/rve $^
 
-fs.img:
-	dd if=/dev/urandom of=$@ bs=1m count=32
+app/hello: app/syscall.S app/hello.c
+	riscv64-unknown-elf-gcc  -nostdlib -T app/app.ld -o app/hello $^
+
+fs.img: app/hello
+	tar -cvf fs.img app/hello
 
 clean:
-	$(RM) src/*.o zig-cache/ $(BIN) fs.img
+	$(RM) src/*.o zig-cache/ $(BIN) fs.img app/hello

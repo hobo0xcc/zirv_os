@@ -6,6 +6,7 @@ const uart = @import("uart.zig");
 const KernelError = @import("kerror.zig").KernelError;
 const panic = @import("panic.zig").panic;
 const util = @import("util.zig");
+const SpinLock = @import("spinlock.zig").SpinLock;
 const Allocator = std.mem.Allocator;
 
 const VIRTIO_RING_SIZE: usize = 1 << 7;
@@ -31,6 +32,7 @@ const VIRTIO_MMIO_STATUS: usize = 0x070;
 const VIRTIO_MMIO_QUEUE_DESC: usize = 0x080;
 const VIRTIO_MMIO_QUEUE_DRIVER: usize = 0x090;
 const VIRTIO_MMIO_QUEUE_DEVICE: usize = 0x0a0;
+const VIRTIO_MMIO_CONFIG: usize = 0x100;
 
 const VIRTIO_CONFIG_ACKNOWLEDGE: u32 = 1;
 const VIRTIO_CONFIG_DRIVER: u32 = 2;
@@ -38,6 +40,10 @@ const VIRTIO_CONFIG_FAILED: u32 = 128;
 const VIRTIO_CONFIG_FEATURES_OK: u32 = 8;
 const VIRTIO_CONFIG_DRIVER_OK: u32 = 4;
 const VIRTIO_CONFIG_DEVICE_NEEDS_RESET: u32 = 64;
+
+const VIRTIO_F_ANY_LAYOUT: usize = 27;
+const VIRTIO_RING_F_INDIRECT_DESC: usize = 28;
+const VIRTIO_F_EVENT_IDX: usize = 29;
 
 const VIRTIO_BLK_F_SIZE_MAX: usize = 1;
 const VIRTIO_BLK_F_SEG_MAX: usize = 2;
@@ -89,6 +95,37 @@ const VirtioRegs = packed struct {
     QueueDriver: u64, // 0x090
     _reserved6: [2]u32,
     QueueDevice: u64,
+};
+
+const VirtioBlkConfig = packed struct {
+    capacity: u64,
+    size_max: u32,
+    seg_max: u32,
+    geometry: VirtioBlkGeometry,
+    blk_size: u32,
+    topology: VirtioBlkTopology,
+    writeback: u8,
+    unused0: [3]u8,
+    max_discard_sectors: u32,
+    max_discard_seg: u32,
+    discard_sector_alignment: u32,
+    max_write_zeroes_sectors: u32,
+    max_write_zeroes_seg: u32,
+    write_zeroes_may_unmap: u8,
+    unused1: [3]u8,
+
+    const VirtioBlkGeometry = packed struct {
+        cylinders: u16,
+        heads: u8,
+        sectors: u8,
+    };
+
+    const VirtioBlkTopology = packed struct {
+        physical_block_exp: u8,
+        alignment_offset: u8,
+        min_io_size: u16,
+        opt_io_size: u32,
+    };
 };
 
 pub const Descriptor = packed struct {
@@ -151,7 +188,7 @@ pub const Used = packed struct {
     }
 };
 
-pub const Queue = packed struct {
+pub const Queue = struct {
     desc: [*]Descriptor,
     avail: *Available,
     used: *Used,
@@ -169,6 +206,14 @@ const VirtioBlkReq = packed struct {
     type_: u32,
     reserved: u32,
     sector: u64,
+};
+
+const VirtioBlkReq2 = packed struct {
+    type_: u32,
+    reserved: u32,
+    sector: u64,
+    data: [*]u8,
+    status: u8,
 };
 
 fn readReg32(ptr: usize, offset: usize) u32 {
@@ -199,6 +244,8 @@ pub const BlockDevice = struct {
     read_only: bool,
     free: [VIRTIO_RING_SIZE]bool,
     status: [VIRTIO_RING_SIZE]u8,
+    done: [VIRTIO_RING_SIZE]bool,
+    lock: SpinLock,
 
     pub fn init(addr: usize, queue: *Queue, read_only: bool) BlockDevice {
         return BlockDevice{
@@ -209,6 +256,8 @@ pub const BlockDevice = struct {
             .read_only = read_only,
             .free = [_]bool{true} ** VIRTIO_RING_SIZE,
             .status = [_]u8{0} ** VIRTIO_RING_SIZE,
+            .lock = SpinLock.init(),
+            .done = [_]bool{false} ** VIRTIO_RING_SIZE,
         };
     }
 };
@@ -216,7 +265,7 @@ pub const BlockDevice = struct {
 pub const disk_idx: usize = 0;
 var block_devices = [_]?BlockDevice{null} ** memlayout.VIRTIO_SIZE_IDX;
 
-pub fn setupVirtioBlk(ptr: usize) !void {
+pub fn setupVirtioBlk(a: *Allocator, ptr: usize) !void {
     // 3.1.1 Driver Requirements: Device Initialization
     if (readReg32(ptr, VIRTIO_MMIO_MAGIC_VALUE) != 0x74726976 or
         readReg32(ptr, VIRTIO_MMIO_VERSION) != 0x2 or
@@ -245,6 +294,9 @@ pub fn setupVirtioBlk(ptr: usize) !void {
     var features = readReg32(ptr, VIRTIO_MMIO_DEVICE_FEATURES);
     features &= ~@intCast(u32, 1 << VIRTIO_BLK_F_RO);
     features &= ~@intCast(u32, 1 << VIRTIO_BLK_F_CONFIG_WCE);
+    features &= ~@intCast(u32, 1 << VIRTIO_F_ANY_LAYOUT);
+    features &= ~@intCast(u32, 1 << VIRTIO_RING_F_INDIRECT_DESC);
+    features &= ~@intCast(u32, 1 << VIRTIO_F_EVENT_IDX);
     writeReg32(ptr, VIRTIO_MMIO_DEVICE_FEATURES, features);
     // 5. Set the FEATURES_OK status bit. The
     // driver MUST NOT accept new feature bits after this step.
@@ -287,19 +339,19 @@ pub fn setupVirtioBlk(ptr: usize) !void {
 
     // 4. Allocate and zero the queue memory,
     // making sure the memory is physically contiguous.
-    var desc_ptr = try memalloc.a.allocAdvanced(u8, 16, 16 * VIRTIO_RING_SIZE, .exact);
+    var desc_ptr = try a.allocAdvanced(u8, 16, 16 * VIRTIO_RING_SIZE, .exact);
     var desc = @ptrCast([*]Descriptor, &desc_ptr[0]);
     var i: usize = 0;
     while (i < VIRTIO_RING_SIZE) : (i += 1) {
         desc[i] = Descriptor.init(0, 0, 0, 0);
     }
-    var avail_ptr = try memalloc.a.allocAdvanced(u8, 2, 6 + 2 * VIRTIO_RING_SIZE, .exact);
+    var avail_ptr = try a.allocAdvanced(u8, 2, 6 + 2 * VIRTIO_RING_SIZE, .exact);
     var avail = @ptrCast(*Available, &avail_ptr[0]);
     avail.* = Available.init(0, 0, 0);
-    var used_ptr = try memalloc.a.allocAdvanced(u8, 2, 6 + 8 * VIRTIO_RING_SIZE, .exact);
+    var used_ptr = try a.allocAdvanced(u8, 2, 6 + 8 * VIRTIO_RING_SIZE, .exact);
     var used = @ptrCast(*Used, &used_ptr[0]);
     used.* = Used.init(0, 0, 0);
-    var virtqueue = try memalloc.a.alloc(Queue, 1);
+    var virtqueue = try a.alloc(Queue, 1);
     virtqueue[0] = Queue.init(desc, avail, used);
     // 5. Notify the device about the queue size by writing the size to QueueNum.
     writeReg32(ptr, VIRTIO_MMIO_QUEUE_NUM, VIRTIO_RING_SIZE);
@@ -323,53 +375,6 @@ pub fn setupVirtioBlk(ptr: usize) !void {
     const idx = (ptr - memlayout.VIRTIO_BASE) >> 12;
     block_devices[idx] = BlockDevice.init(ptr, &virtqueue[0], false);
 }
-
-// fn setupVirtioBlk(a: *Allocator, ptr: usize) !void {
-//     const idx = (ptr - memlayout.VIRTIO_BASE) >> 12;
-//     writeReg32(ptr, VIRTIO_MMIO_STATUS, 0);
-//     var status_bits = VIRTIO_CONFIG_ACKNOWLEDGE;
-//     writeReg32(ptr, VIRTIO_MMIO_STATUS, status_bits);
-//     status_bits |= VIRTIO_CONFIG_DRIVER_OK;
-//     writeReg32(ptr, VIRTIO_MMIO_STATUS, status_bits);
-//     const host_features = readReg32(ptr, VIRTIO_MMIO_DEVICE_FEATURES);
-//     const guest_features = host_features & ~(@as(usize, 1) << VIRTIO_BLK_F_RO);
-//     const readonly = host_features & (@as(usize, 1) << VIRTIO_BLK_F_RO) != 0;
-//     writeReg32(ptr, VIRTIO_MMIO_DRIVER_FEATURES, @intCast(u32, guest_features));
-//     status_bits |= VIRTIO_CONFIG_FEATURES_OK;
-//     writeReg32(ptr, VIRTIO_MMIO_STATUS, status_bits);
-//     const status_ok = readReg32(ptr, VIRTIO_MMIO_STATUS);
-//     if (status_ok & VIRTIO_CONFIG_FEATURES_OK == 0) {
-//         writeReg32(ptr, VIRTIO_MMIO_STATUS, VIRTIO_CONFIG_FAILED);
-//         return KernelError.SYSERR;
-//     }
-//
-//     const queue_num_max = readReg32(ptr, VIRTIO_MMIO_QUEUE_NUM_MAX);
-//     writeReg32(ptr, VIRTIO_MMIO_QUEUE_NUM, @intCast(u32, VIRTIO_RING_SIZE));
-//     if (@intCast(u32, VIRTIO_RING_SIZE) > queue_num_max) {
-//         return KernelError.SYSERR;
-//     }
-//     writeReg32(ptr, VIRTIO_MMIO_QUEUE_READY, 1);
-//
-//     const num_pages = (@sizeOf(Queue) + riscv.PAGE_SIZE - 1) / riscv.PAGE_SIZE;
-//     writeReg32(ptr, VIRTIO_MMIO_QUEUE_SEL, 0);
-//     var queue_arr = try a.alloc(u8, riscv.PAGE_SIZE * num_pages);
-//     util.memset(queue_arr, 0);
-//     var queue_ptr = @ptrCast(*Queue, &queue_arr[0]);
-//     var queue_pfn = @intCast(u32, @ptrToInt(queue_ptr));
-//     writeReg32(ptr, VIRTIO_MMIO_DRIVER_PAGE_SIZE, @intCast(u32, riscv.PAGE_SIZE));
-//     writeReg32(ptr, VIRTIO_MMIO_QUEUE_PFN, (queue_pfn / @intCast(u32, riscv.PAGE_SIZE)));
-//     block_devices[idx] = BlockDevice{
-//         .addr = ptr,
-//         .queue = queue_ptr,
-//         .idx = 0,
-//         .ack_used_idx = 0,
-//         .read_only = readonly,
-//         .free = [_]bool{true} ** VIRTIO_RING_SIZE,
-//         .status = [_]u8{0} ** VIRTIO_RING_SIZE,
-//     };
-//     status_bits |= VIRTIO_CONFIG_DRIVER_OK;
-//     writeReg32(ptr, VIRTIO_MMIO_STATUS, status_bits);
-// }
 
 pub fn allocDesc(bdev: *BlockDevice) ?u16 {
     for (bdev.free) |*is_free, idx| {
@@ -410,6 +415,13 @@ pub fn allocNDesc(bdev: *BlockDevice, n: usize, idxes: [*]u16) bool {
     return true;
 }
 
+pub fn freeNDesc(bdev: *BlockDevice, n: usize, idxes: [*]u16) void {
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        freeDesc(bdev, idxes[i]);
+    }
+}
+
 pub fn writeDescTab(bdev: *BlockDevice, desc: Descriptor, idx: u16) void {
     bdev.queue.desc[idx] = desc;
 }
@@ -417,6 +429,8 @@ pub fn writeDescTab(bdev: *BlockDevice, desc: Descriptor, idx: u16) void {
 pub fn blockOp(a: *Allocator, dev_id: usize, buffer: [*]u8, size: u32, offset: u64, write_flag: bool) !void {
     if (block_devices[dev_id - 1] != null) {
         var bdev = &block_devices[dev_id - 1].?;
+        var held = (&bdev.lock).acquire();
+        defer held.release();
         if (bdev.read_only and write_flag) {
             panic("Trying too write to read-only\n", .{});
         }
@@ -424,11 +438,12 @@ pub fn blockOp(a: *Allocator, dev_id: usize, buffer: [*]u8, size: u32, offset: u
         const sector = offset / 512;
         const blk_request_size = @sizeOf(VirtioBlkReq);
         var blk_req_arr = try a.alloc(u8, blk_request_size);
-        const blk_request = @ptrCast(*VirtioBlkReq, &blk_req_arr[0]);
+        var blk_request = @ptrCast(*VirtioBlkReq, &blk_req_arr[0]);
         var desc_idxes_addr = try a.alloc(u16, 3);
         var desc_idxes = @ptrCast([*]u16, &desc_idxes_addr[0]);
         if (!allocNDesc(bdev, 3, desc_idxes)) {
-            return KernelError.SYSERR;
+            panic("allocNDesc failed!\n", .{});
+            // return KernelError.SYSERR;
         }
         const desc0 = Descriptor{
             .addr = @ptrToInt(blk_request),
@@ -465,21 +480,32 @@ pub fn blockOp(a: *Allocator, dev_id: usize, buffer: [*]u8, size: u32, offset: u
         writeDescTab(bdev, desc2, desc_idxes[2]);
 
         var idx = @intCast(usize, bdev.queue.avail.idx % VIRTIO_RING_SIZE);
-        var ring_ptr = @ptrCast([*]align(1:0:2048) u16, &bdev.queue.avail.ring[0]);
-        // ring_ptr[idx] = desc_idxes[0];
         bdev.queue.avail.ring[idx] = desc_idxes[0];
+        asm volatile ("fence iorw, iorw");
         bdev.queue.avail.idx += 1;
+        asm volatile ("fence iorw, iorw");
+        var used_idx = bdev.ack_used_idx;
         writeReg32(bdev.addr, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
-        // try uart.out.print("addr: {x}, status: {x}\n", .{ bdev.addr, readReg32(bdev.addr, VIRTIO_MMIO_STATUS) });
+        while (!bdev.done[used_idx]) {}
+        bdev.done[used_idx] = false;
+        freeNDesc(bdev, 3, desc_idxes);
     }
 }
 
-pub fn read(dev: usize, buffer: [*]u8, size: u32, offset: u64) !void {
-    try blockOp(memalloc.a, dev, buffer, size, offset, false);
+pub fn read(a: *Allocator, dev: usize, buffer: [*]u8, size: u32, offset: u64) !void {
+    @memset(buffer, 0, size);
+    try blockOp(a, dev, buffer, size, offset, false);
 }
 
-pub fn write(dev: usize, buffer: [*]u8, size: u32, offset: u64) !void {
-    try blockOp(memalloc.a, dev, buffer, size, offset, true);
+pub fn write(a: *Allocator, dev: usize, buffer: [*]u8, size: u32, offset: u64) !void {
+    @memset(buffer, 0, size);
+    try blockOp(a, dev, buffer, size, offset, true);
+}
+
+pub fn getDiskSectorLen(dev: usize) usize {
+    var conf = @intToPtr(*VirtioBlkConfig, memlayout.VIRTIO_BASE + VIRTIO_MMIO_CONFIG);
+    return conf.capacity;
+    // return @intToPtr(*u32, @ptrToInt(conf) + 8).*;
 }
 
 pub fn init(a: *Allocator) !void {
@@ -494,20 +520,24 @@ pub fn init(a: *Allocator) !void {
 
         if (device_id == 2) {
             try uart.out.print("Block Device: 0x{x}\n", .{virtio_ptr});
-            try setupVirtioBlk(virtio_ptr);
+            try setupVirtioBlk(a, virtio_ptr);
         }
     }
 }
 
 pub fn pending(a: *Allocator, bdev: *BlockDevice) void {
+    writeReg32(bdev.addr, VIRTIO_MMIO_INTERRUPT_ACK, readReg32(bdev.addr, VIRTIO_MMIO_INTERRUPT_STATUS) & 0x3);
     while (bdev.ack_used_idx != bdev.queue.used.idx) {
-        var idx = @intCast(usize, bdev.ack_used_idx);
-        var ring_ptr = @ptrCast([*]UsedElem, &bdev.queue.used.ring[0]);
+        var idx = @intCast(usize, bdev.ack_used_idx % VIRTIO_RING_SIZE);
         var elem = bdev.queue.used.ring[idx];
+        if (bdev.status[elem.id] != 0) {
+            panic("status\n", .{});
+        }
         bdev.ack_used_idx = @intCast(u16, (bdev.ack_used_idx + 1) % VIRTIO_RING_SIZE);
         var request_ptr = @intToPtr([*]u8, bdev.queue.desc[elem.id].addr);
         var request_arr = request_ptr[0..bdev.queue.desc[elem.id].len];
         a.free(request_arr);
+        bdev.done[idx] = true;
     }
 }
 

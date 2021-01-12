@@ -6,7 +6,7 @@ comptime {
         \\ _entry:
         \\     la sp, stack0
         \\     addi a1, zero, 1
-        \\     slli a1, a1, 14
+        \\     slli a1, a1, 15
         \\     add sp, sp, a1
         \\     call start
         \\ spin:

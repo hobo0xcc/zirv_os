@@ -2,21 +2,20 @@ const csr = @import("csr.zig");
 const main = @import("main.zig");
 const uart = @import("uart.zig");
 const trap = @import("trap.zig");
+const timer = @import("timer.zig");
 
 const StackTrace = struct {
     index: usize,
     instruction_addresses: [*]usize,
 };
 
-var ins_addrs = [_]usize{0} ** 0x1000;
+pub var ins_addrs = [_]usize{0} ** 0x1000;
 
-export var stack_trace = StackTrace{
+pub export var stack_trace = StackTrace{
     .index = 0,
     .instruction_addresses = @ptrCast([*]usize, &ins_addrs[0]),
 };
 
-// CPUをSuperVisorモードにして例外・割り込みを有効にする
-// 最終的にはmretでmainにジャンプ
 pub export fn start() void {
     var mstatus = csr.readMstatus();
     mstatus &= ~csr.MSTATUS_MPP;
@@ -29,8 +28,6 @@ pub export fn start() void {
     sstatus |= csr.SSTATUS_SIE;
     csr.writeSstatus(sstatus);
 
-    // mepcにmain関数のアドレスを書き込む
-    // mepcはmretによって読み込まれ、ジャンプする
     csr.writeMepc(@ptrToInt(main.main));
 
     // ページングを無効にする
@@ -42,7 +39,9 @@ pub export fn start() void {
 
     csr.writeSie(csr.readSie() | csr.SIE_SEIE | csr.SIE_STIE | csr.SIE_SSIE);
     csr.writeMie(csr.readMie() | csr.MIE_MTIE);
-    csr.writeMtvec(@ptrToInt(trap.timervec));
+    try timer.init();
+
+    asm volatile ("la ra, errorOccurred");
 
     asm volatile ("la a0, stack_trace");
 

@@ -1,25 +1,13 @@
 OUTPUT_ARCH( "riscv" )
-ENTRY( _entry )
+ENTRY( main )
 
 SECTIONS
 {
-  /*
-   * ensure that entry.S / _entry is at 0x80000000,
-   * where qemu's -kernel jumps.
-   */
-  . = 0x80000000;
+  . = 0x1000;
 
   .text : {
     PROVIDE(_text_start = .);
     *(.text .text.*)
-    . = ALIGN(0x1000);
-    _trampoline = .;
-    *(trampsec)
-    . = ALIGN(0x1000);
-    nullproc = .;
-    *(nullsec)
-    . = ALIGN(0x1000);
-    /*ASSERT(. - _trampoline == 0x1000, "error: trampoline larger than one page"); */
     PROVIDE(_text_end = .);
   }
 
@@ -52,3 +40,4 @@ SECTIONS
 
   PROVIDE(_end = .);
 }
+

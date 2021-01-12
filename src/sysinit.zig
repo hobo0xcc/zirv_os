@@ -9,26 +9,33 @@ const timer = @import("timer.zig");
 const csr = @import("csr.zig");
 const plic = @import("plic.zig");
 const virtio = @import("virtio.zig");
+const syscall = @import("syscall.zig");
+const util = @import("util.zig");
 const Allocator = std.mem.Allocator;
 
 pub const KernelEnv = struct {
     root_table: *vm.Table,
-    allocator: *Allocator,
+    a: *Allocator,
     out: *const uart.uart_writer,
+    in: *const uart.uart_reader,
 };
 
-pub fn init(allocator: *Allocator) !KernelEnv {
+pub fn init(a: *Allocator) !KernelEnv {
     uart.UART.init();
     var out = &uart.out;
+    var in = &uart.in;
     trap.init();
-    var root_table = try vm.init(allocator);
-    try proc.init(allocator);
-    try timer.init();
+    var root_table = try vm.init(a);
+    try trap.userinit(a, root_table);
+    try proc.init(a, root_table);
     plic.init();
-    try virtio.init(allocator);
+    try virtio.init(a);
+    syscall.env = try a.create(syscall.SysCall);
+    syscall.env.* = syscall.SysCall.init(root_table, a);
     return KernelEnv{
         .root_table = root_table,
-        .allocator = allocator,
+        .a = a,
         .out = out,
+        .in = in,
     };
 }

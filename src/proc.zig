@@ -1,15 +1,22 @@
 const std = @import("std");
-const SpinLock = @import("spinlock.zig").SpinLock;
 const util = @import("util.zig");
 const memalloc = @import("memalloc.zig");
 const trap = @import("trap.zig");
 const uart = @import("uart.zig");
+const vm = @import("vm.zig");
+const riscv = @import("riscv.zig");
+const trampoline = @import("trampoline.zig");
+const loader = @import("loader.zig");
+const nullproc = @import("nullproc.zig");
+const memlayout = @import("memlayout.zig");
+const SpinLock = @import("spinlock.zig").SpinLock;
 const KernelError = @import("kerror.zig").KernelError;
 const Allocator = std.mem.Allocator;
+const Exact = Allocator.Exact;
 
 pub const Pid = usize;
 pub const Prio = usize;
-pub const PriorityQueue = std.PriorityQueue(*ProcEntry);
+pub const PriorityQueue = std.PriorityQueue(*Process);
 pub const PrioU64 = std.PriorityQueue(u64);
 pub const DeltaList = std.SinglyLinkedList(ProcDelay);
 
@@ -34,8 +41,7 @@ pub const ProcStatus = enum {
     Sleep,
 };
 
-// プロセスのエントリ
-pub const ProcEntry = struct {
+pub const Process = struct {
     lock: SpinLock,
 
     prstate: ProcStatus, // プロセスの状態
@@ -44,13 +50,15 @@ pub const ProcEntry = struct {
     prstkbase: u64, // 実行時スタックのベース
     prstktop: u64, // スタックのトップのアドレス
     prstklen: usize, // スタックの長さ
-    prname: [PNAMELEN]u8, // プロセスの名前
+    prname: []const u8, // プロセスの名前
     prparent: Pid, // 親プロセスのpid
     prpid: Pid, // 自分のpid
-    ctx: Context,
+    ctx: Context, // 保存されたコンテキスト
+    trapframe: *TrapFrame,
+    page_table: *vm.Table, // プロセスのページテーブル
 
-    pub fn init() ProcEntry {
-        return ProcEntry{
+    pub fn init() Process {
+        return Process{
             .lock = SpinLock.init(),
             .prstate = ProcStatus.Free,
             .prprio = 0,
@@ -58,10 +66,12 @@ pub const ProcEntry = struct {
             .prstkbase = 0,
             .prstktop = 0,
             .prstklen = 0,
-            .prname = [_]u8{0} ** PNAMELEN,
+            .prname = undefined,
             .prparent = 0,
             .prpid = 0,
             .ctx = Context.init(),
+            .trapframe = undefined,
+            .page_table = undefined,
         };
     }
 };
@@ -102,6 +112,81 @@ pub const Context = packed struct {
     }
 };
 
+pub const TrapFrame = packed struct {
+    // 0
+    kernel_satp: u64,
+    // 8
+    kernel_sp: u64,
+    // 16
+    kernel_trap: u64,
+    // 24
+    epc: u64,
+    // 32
+    kernel_hartid: u64,
+    // 40
+    ra: u64,
+    // 48
+    sp: u64,
+    // 56
+    gp: u64,
+    // 64
+    tp: u64,
+    // 72
+    t0: u64,
+    // 80
+    t1: u64,
+    // 88
+    t2: u64,
+    // 96
+    s0: u64,
+    // 104
+    s1: u64,
+    // 112
+    a0: u64,
+    // 120
+    a1: u64,
+    // 128
+    a2: u64,
+    // 136
+    a3: u64,
+    // 144
+    a4: u64,
+    // 152
+    a5: u64,
+    // 160
+    a6: u64,
+    // 168
+    a7: u64,
+    // 176
+    s2: u64,
+    // 184
+    s3: u64,
+    // 192
+    s4: u64,
+    // 200
+    s5: u64,
+    // 208
+    s6: u64,
+    // 216
+    s7: u64,
+    // 224
+    s8: u64,
+    // 232
+    s9: u64,
+    // 240
+    s10: u64,
+    // 248
+    s11: u64,
+    // 256
+    t4: u64,
+    // 264
+    t5: u64,
+    // 272
+    t6: u64,
+    // 280
+    t7: u64,
+};
+
 const Defer = packed struct {
     ndefers: i32,
     attempt: bool,
@@ -120,15 +205,16 @@ pub const MINSTK = 400;
 pub const DEFAULTSTK: usize = 8192;
 pub const DEFAULTPRIO: usize = 10;
 
-var proctab = [_]ProcEntry{ProcEntry.init()} ** NPROC;
+pub var proctab = [_]Process{Process.init()} ** NPROC;
 var readylist: PriorityQueue = undefined;
 var currpid: Pid = 0;
 var prcount: usize = 0;
 var defer_proc = Defer{ .ndefers = 0, .attempt = false };
+
 pub var sleapq = DeltaList{};
 pub var proc_delay_tab = [_]DeltaList.Node{DeltaList.Node{ .next = null, .data = ProcDelay.init() }} ** NPROC;
 
-pub fn prioCompare(a: *ProcEntry, b: *ProcEntry) bool {
+pub fn prioCompare(a: *Process, b: *Process) bool {
     return a.prprio > b.prprio;
 }
 
@@ -136,18 +222,33 @@ pub fn compare(a: u64, b: u64) bool {
     return a > b;
 }
 
-pub fn init(a: *Allocator) !void {
+pub fn init(a: *Allocator, root: *vm.Table) !void {
     readylist = PriorityQueue.init(a, prioCompare);
-    var proc = &proctab[NULLPROC];
-    util.memcpyConst(@ptrCast([*]u8, &proc.prname[0]), "prnull", 6);
-    proc.prstate = ProcStatus.Curr;
-    proc.prprio = 0;
-    var stk_ptr = try a.alloc(u8, NULLSTK);
-    proc.prstktop = @ptrToInt(&stk_ptr[0]);
-    proc.prstkbase = proc.prstktop;
-    proc.prstklen = NULLSTK;
-    proc.prstkptr = 0;
-    proc.prpid = NULLPROC;
+    var pid = NULLPROC;
+    try setupProc(a, pid, NULLSTK, 0, try util.getMutStr(a, "null"), 0);
+    var proc = &proctab[pid];
+    try vm.map(a, proc.page_table, riscv.NULLPROC_ADDR, @ptrToInt(nullproc.nullproc), vm.PTE_R | vm.PTE_X | vm.PTE_U, 0);
+    proc.trapframe.epc = riscv.NULLPROC_ADDR;
+    // var proc = &proctab[NULLPROC];
+    // util.memcpyConst(@ptrCast([*]u8, &proc.prname[0]), "null", 4);
+    // proc.prstate = ProcStatus.Curr;
+    // proc.prprio = 0;
+    // var stk_ptr = try a.alloc(u8, NULLSTK);
+    // proc.prstktop = @ptrToInt(&stk_ptr[0]);
+    // proc.prstkbase = proc.prstktop;
+    // proc.prstklen = NULLSTK;
+    // proc.prstkptr = 0;
+    // proc.prpid = NULLPROC;
+    // var trapframe_ptr = try a.allocAdvanced(u8, 0x1000, 0x1000, Exact.at_least);
+    // proc.trapframe = @ptrCast(*TrapFrame, &trapframe_ptr[0]);
+    // try vm.map(a, root, riscv.NULLPROC_ADDR, @ptrToInt(nullproc.nullproc), vm.PTE_R | vm.PTE_X | vm.PTE_U, 0);
+    // proc.page_table = try makePageTableForProc(a, proc);
+    // proc.trapframe.epc = riscv.NULLPROC_ADDR;
+    // proc.ctx.ra = @ptrToInt(trap.usertrapret);
+    // var stack_arr = try memalloc.getStack(a, NULLSTK);
+    // var saddr: u64 = @ptrToInt(stack_arr);
+    // try mapProcPageTable(a, NULLPROC, riscv.USER_STACK_TOP, @intCast(usize, saddr), NULLSTK, vm.PTE_R | vm.PTE_W | vm.PTE_U);
+    // proc.ctx.sp = saddr;
     currpid = NULLPROC;
 }
 
@@ -193,6 +294,10 @@ pub fn getPid() Pid {
     return currpid;
 }
 
+pub fn getCurrProc() *Process {
+    return &proctab[getPid()];
+}
+
 pub fn suspendProc(pid: Pid) !usize {
     var mask = trap.disable();
     defer trap.restore(mask);
@@ -230,33 +335,103 @@ pub fn suspendProc(pid: Pid) !usize {
     return prio;
 }
 
-pub fn createProc(allocator: *Allocator, func: u64, stk_size: usize, prio: usize, name: []u8, nargs: usize) !Pid {
+// for elf loader
+pub fn mapProcPageTable(a: *Allocator, pid: Pid, vaddr: usize, paddr: usize, size: usize, bits: u64) !void {
+    const proc = &proctab[pid];
+    try vm.addrMapRange(a, proc.page_table, vaddr, paddr, size, bits);
+}
+
+// make page table with required mappings.
+pub fn makePageTableForProc(a: *Allocator, proc: *Process) !*vm.Table {
+    var table_arr = try a.allocAdvanced(u8, 0x1000, 0x1000, Exact.at_least);
+    var table = @ptrCast(*vm.Table, &table_arr[0]);
+    try vm.map(a, table, riscv.TRAMPOLINE, @ptrToInt(trampoline._trampoline), vm.PTE_R | vm.PTE_X, 0);
+    // try uart.out.print("debug1: {x}, {x}\n", .{ riscv.trampoline, @ptrtoint(trampoline._trampoline) });
+    try vm.map(a, table, riscv.TRAPFRAME, @ptrToInt(proc.trapframe), vm.PTE_R | vm.PTE_W, 0);
+    return table;
+}
+
+pub fn exec(a: *Allocator, name: []u8) !void {
+    const pid = try createProc(a, DEFAULTSTK, DEFAULTPRIO, name, 0);
+    const proc = &proctab[pid];
+    const entry_addr = try loader.loadExecFile(a, name, proc.page_table);
+    proc.trapframe.epc = entry_addr;
+    try uart.out.print("entry: {x}\n", .{entry_addr});
+    _ = try resumeProc(pid);
+}
+
+pub fn setupProc(a: *Allocator, pid: Pid, stk_size: usize, prio: usize, name: []u8, nargs: usize) !void {
     var mask = trap.disable();
     defer trap.restore(mask);
     var stack_len = stk_size;
     if (stack_len < MINSTK) {
         stack_len = MINSTK;
     }
-
-    var pid = try newPid();
-    var stack_arr = try memalloc.getStack(allocator, stack_len);
+    var stack_arr = try memalloc.getStack(a, stack_len);
     var saddr: u64 = @ptrToInt(stack_arr);
 
     prcount += 1;
     var proc = &proctab[pid];
+    // proc.ctx.ra = func;
+    var trapframe_ptr = try a.allocAdvanced(u8, 0x1000, 0x1000, Exact.at_least);
+    proc.trapframe = @ptrCast(*TrapFrame, &trapframe_ptr[0]);
+    proc.page_table = try makePageTableForProc(a, proc);
+    try mapProcPageTable(a, pid, riscv.USER_STACK_TOP - stack_len, saddr - stack_len, stack_len, vm.PTE_W | vm.PTE_R | vm.PTE_U);
+    try vm.map(a, proc.page_table, memlayout.UART_BASE, memlayout.UART_BASE, vm.PTE_R | vm.PTE_W, 0);
+    proc.ctx.ra = @ptrToInt(trap.usertrapret);
+    proc.ctx.sp = @ptrToInt(&trap.trap_stack[0]);
+    var kernel_stack = try a.allocAdvanced(u8, 0x1000, 0x1000, Exact.exact);
+    var kernel_stack_top = @ptrToInt(&kernel_stack[0]) + 0x1000;
+    proc.trapframe.kernel_sp = kernel_stack_top;
+    proc.trapframe.sp = riscv.USER_STACK_TOP;
     proc.prstate = ProcStatus.Susp;
     proc.prprio = prio;
     proc.prpid = pid;
     proc.prstkbase = saddr;
     proc.prstklen = stack_len;
-    proc.ctx.ra = func;
-    proc.ctx.sp = saddr;
     if (name.len >= PNAMELEN) {
-        trap.restore(mask);
         return KernelError.SYSERR;
     }
-    util.memcpy(@ptrCast([*]u8, &proc.prname[0]), name, name.len);
+    // util.memcpy(@ptrCast([*]u8, &proc.prname[0]), name, name.len);
+    proc.prname = name;
     proc.prparent = getPid();
+}
+
+pub fn createProc(a: *Allocator, stk_size: usize, prio: usize, name: []u8, nargs: usize) !Pid {
+    var mask = trap.disable();
+    defer trap.restore(mask);
+
+    var stack_len = stk_size;
+    if (stack_len < MINSTK) {
+        stack_len = MINSTK;
+    }
+    var pid = try newPid();
+    try setupProc(a, pid, stk_size, prio, name, nargs);
+    // var stack_arr = try memalloc.getStack(a, stack_len);
+    // var saddr: u64 = @ptrToInt(stack_arr);
+
+    // prcount += 1;
+    // var proc = &proctab[pid];
+    // // proc.ctx.ra = func;
+    // var trapframe_ptr = try a.allocAdvanced(u8, 0x1000, 0x1000, Exact.at_least);
+    // proc.trapframe = @ptrCast(*TrapFrame, &trapframe_ptr[0]);
+    // proc.page_table = try makePageTableForProc(a, proc);
+    // try mapProcPageTable(a, pid, riscv.USER_STACK_TOP - stack_len, saddr - stack_len, stack_len, vm.PTE_W | vm.PTE_R | vm.PTE_U);
+    // try vm.map(a, proc.page_table, memlayout.UART_BASE, memlayout.UART_BASE, vm.PTE_R | vm.PTE_W, 0);
+    // proc.ctx.ra = @ptrToInt(trap.usertrapret);
+    // proc.ctx.sp = @ptrToInt(&trap.trap_stack[0]);
+    // proc.trapframe.sp = riscv.USER_STACK_TOP;
+    // proc.prstate = ProcStatus.Susp;
+    // proc.prprio = prio;
+    // proc.prpid = pid;
+    // proc.prstkbase = saddr;
+    // proc.prstklen = stack_len;
+    // if (name.len >= PNAMELEN) {
+    //     trap.restore(mask);
+    //     return KernelError.SYSERR;
+    // }
+    // util.memcpy(@ptrCast([*]u8, &proc.prname[0]), name, name.len);
+    // proc.prparent = getPid();
 
     return pid;
 }
@@ -321,7 +496,7 @@ pub fn sleepProc(delay: u64) !void {
 }
 
 pub fn wakeupProc() !void {
-    try resched_ctrl(DeferStatus.DEFER_START);
+    try reschedCtrl(DeferStatus.DEFER_START);
     var pid = getPid();
     while (sleapq.first) |node| {
         if (node.data.delay == 0) {
@@ -331,14 +506,14 @@ pub fn wakeupProc() !void {
         }
     }
 
-    try resched_ctrl(DeferStatus.DEFER_STOP);
+    try reschedCtrl(DeferStatus.DEFER_STOP);
 }
 
 pub fn ready(pid: Pid) !void {
     if (isBadPid(pid)) {
         return KernelError.SYSERR;
     }
-    var proc: *ProcEntry = &proctab[pid];
+    var proc: *Process = &proctab[pid];
     proc.prstate = ProcStatus.Ready;
     try readylist.add(proc);
     try resched();
@@ -361,7 +536,7 @@ comptime {
         \\ sd s9, 88(a0)
         \\ sd s10, 96(a0)
         \\ sd s11, 104(a0)
-        \\ ld t6, 0(a1)
+        \\ ld ra, 0(a1)
         \\ ld sp, 8(a1)
         \\ ld s0, 16(a1)
         \\ ld s1, 24(a1)
@@ -375,7 +550,7 @@ comptime {
         \\ ld s9, 88(a1)
         \\ ld s10, 96(a1)
         \\ ld s11, 104(a1)
-        \\ jr t6
+        \\ ret
     );
 }
 
@@ -384,7 +559,10 @@ pub extern fn swtch(old_ctx: u64, new_ctx: u64) void;
 pub fn resched() !void {
     if (defer_proc.ndefers > 0) {
         defer_proc.attempt = true;
+        return;
     }
+
+    trap.intrOn();
 
     var old_proc = &proctab[currpid];
     if (old_proc.prstate == ProcStatus.Curr) {
@@ -404,10 +582,11 @@ pub fn resched() !void {
     new_proc.prstate = ProcStatus.Curr;
 
     // try uart.out.print("Context switch: {} -> {}\n", .{ old_proc.prpid, new_proc.prpid });
+    try uart.out.print("Debug1: resched: old_proc.pid: {}, new_proc.pid: {}, new_proc.ctx.ra: {x}\n", .{ old_proc.prpid, new_proc.prpid, new_proc.ctx.ra });
     swtch(@ptrToInt(&old_proc.ctx), @ptrToInt(&new_proc.ctx));
 }
 
-pub fn resched_ctrl(defer_status: DeferStatus) !void {
+pub fn reschedCtrl(defer_status: DeferStatus) !void {
     switch (defer_status) {
         .DEFER_START => {
             if (defer_proc.ndefers == 0) {

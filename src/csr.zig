@@ -9,6 +9,8 @@ pub const MSTATUS_MIE: u64 = 0b1 << 3;
 pub const MSTATUS_SIE: u64 = 0b1 << 1;
 
 pub const SSTATUS_SIE: u64 = 0b1 << 1;
+pub const SSTATUS_SPIE: u64 = 0b1 << 5;
+pub const SSTATUS_SPP: u64 = 0b1 << 8;
 
 pub const SIE_SEIE: u64 = 0b1 << 9;
 pub const SIE_STIE: u64 = 0b1 << 5;
