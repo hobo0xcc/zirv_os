@@ -88,10 +88,10 @@ pub fn loadExecFile(a: *Allocator, name: []u8, page_table: *vm.Table) !u64 {
     }
 
     var header = @ptrCast(*elf.Elf64_Ehdr, @alignCast(8, buf));
-    try uart.out.print("Debug: e_machine: {}\n", .{header.e_machine});
-    try uart.out.print("Debug: e_entry: {x}\n", .{header.e_entry});
-    try uart.out.print("Debug: e_phoff: {x}\n", .{header.e_phoff});
-    try uart.out.print("Debug: e_phnum: {x}\n", .{header.e_phnum});
+    // try uart.out.print("Debug: e_machine: {}\n", .{header.e_machine});
+    // try uart.out.print("Debug: e_entry: {x}\n", .{header.e_entry});
+    // try uart.out.print("Debug: e_phoff: {x}\n", .{header.e_phoff});
+    // try uart.out.print("Debug: e_phnum: {x}\n", .{header.e_phnum});
 
     if (header.e_type != elf.ET.EXEC) {
         try uart.out.print("loadExecFile: file `{}` is not an executable file\n", .{name});
@@ -109,7 +109,7 @@ pub fn loadExecFile(a: *Allocator, name: []u8, page_table: *vm.Table) !u64 {
     var offset: usize = undefined;
     var p_idx: usize = 0;
     while (program_iter.next()) |program| : (p_idx += 1) {
-        try uart.out.print("program: memsz: {}\n", .{program.p_memsz});
+        // try uart.out.print("program: memsz: {}\n", .{program.p_memsz});
         var arr = try a.allocAdvanced(
             u8,
             0x1000,
@@ -136,11 +136,11 @@ pub fn loadExecFile(a: *Allocator, name: []u8, page_table: *vm.Table) !u64 {
         if (section.sh_addr != 0 and section.sh_size != 0) {
             util.memcpy(program_mem + section.sh_addr - offset, buf + section.sh_offset, section.sh_size);
         }
-        try uart.out.print("section {}: `{}`\n", .{ s_idx, util.getStrFromPtr(strtab + section.sh_name) });
-        try uart.out.print("\tsh_addr: {x}\n", .{section.sh_addr});
-        try uart.out.print("\tsh_offset: {x}\n", .{section.sh_offset});
+        // try uart.out.print("section {}: `{}`\n", .{ s_idx, util.getStrFromPtr(strtab + section.sh_name) });
+        // try uart.out.print("\tsh_addr: {x}\n", .{section.sh_addr});
+        // try uart.out.print("\tsh_offset: {x}\n", .{section.sh_offset});
     }
-    try uart.out.print("loading `{}`...\n", .{name});
+    // try uart.out.print("loading `{}`...\n", .{name});
 
     return header.e_entry;
 }

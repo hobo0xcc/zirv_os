@@ -78,9 +78,18 @@ pub const Uart = struct {
         while (true) {
             ch_opt = self.readChar();
             if (ch_opt) |ch| {
-                self.storeInputBuf(ch);
                 if (echoback) {
-                    try self.kputc(ch);
+                    if (ch == '\r') {
+                        try self.kputc('\n');
+                    } else {
+                        try self.kputc(ch);
+                    }
+                }
+
+                if (ch == '\r') {
+                    self.storeInputBuf('\n');
+                } else {
+                    self.storeInputBuf(ch);
                 }
             } else {
                 break;

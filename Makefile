@@ -2,6 +2,7 @@ ZIG=zig
 ZIGOPT=-target riscv64-freestanding --cache-dir $(CACHE) -mcmodel=medium
 ZIGEXEOPT=-target riscv64-freestanding --cache-dir $(CACHE)
 RM=rm -rf
+MAKE=make
 
 SRC=$(wildcard src/*.zig)
 OBJ=$(SRC:.zig=.o)
@@ -23,11 +24,9 @@ qemu-gdb: $(BIN) fs.img
 rve: $(BIN) fs.img
 	~/d/src/rve/bin/rve $^
 
-app/hello: app/syscall.S app/hello.c
-	riscv64-unknown-elf-gcc  -nostdlib -T app/app.ld -o app/hello $^
-
-fs.img: app/hello
-	tar -cvf fs.img app/hello
+fs.img:
+	./makefs.sh
 
 clean:
-	$(RM) src/*.o zig-cache/ $(BIN) fs.img app/hello
+	$(RM) src/*.o zig-cache/ $(BIN) fs.img
+	$(MAKE) -C app clean

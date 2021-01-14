@@ -12,5 +12,5 @@ pub fn panic(comptime fmt: []const u8, args: anytype) noreturn {
 pub export fn errorOccurred() noreturn {
     var error_idx: usize = 0; // start.stack_trace.index - 1;
     var cause = start.stack_trace.instruction_addresses[error_idx];
-    panic("error occurred: {x}\n", .{cause});
+    panic("Error occurred: {x}\n", .{cause});
 }

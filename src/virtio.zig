@@ -6,6 +6,7 @@ const uart = @import("uart.zig");
 const KernelError = @import("kerror.zig").KernelError;
 const panic = @import("panic.zig").panic;
 const util = @import("util.zig");
+const trap = @import("trap.zig");
 const SpinLock = @import("spinlock.zig").SpinLock;
 const Allocator = std.mem.Allocator;
 
@@ -485,6 +486,7 @@ pub fn blockOp(a: *Allocator, dev_id: usize, buffer: [*]u8, size: u32, offset: u
         bdev.queue.avail.idx += 1;
         asm volatile ("fence iorw, iorw");
         var used_idx = bdev.ack_used_idx;
+        trap.intrOn();
         writeReg32(bdev.addr, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
         while (!bdev.done[used_idx]) {}
         bdev.done[used_idx] = false;

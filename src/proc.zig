@@ -229,26 +229,6 @@ pub fn init(a: *Allocator, root: *vm.Table) !void {
     var proc = &proctab[pid];
     try vm.map(a, proc.page_table, riscv.NULLPROC_ADDR, @ptrToInt(nullproc.nullproc), vm.PTE_R | vm.PTE_X | vm.PTE_U, 0);
     proc.trapframe.epc = riscv.NULLPROC_ADDR;
-    // var proc = &proctab[NULLPROC];
-    // util.memcpyConst(@ptrCast([*]u8, &proc.prname[0]), "null", 4);
-    // proc.prstate = ProcStatus.Curr;
-    // proc.prprio = 0;
-    // var stk_ptr = try a.alloc(u8, NULLSTK);
-    // proc.prstktop = @ptrToInt(&stk_ptr[0]);
-    // proc.prstkbase = proc.prstktop;
-    // proc.prstklen = NULLSTK;
-    // proc.prstkptr = 0;
-    // proc.prpid = NULLPROC;
-    // var trapframe_ptr = try a.allocAdvanced(u8, 0x1000, 0x1000, Exact.at_least);
-    // proc.trapframe = @ptrCast(*TrapFrame, &trapframe_ptr[0]);
-    // try vm.map(a, root, riscv.NULLPROC_ADDR, @ptrToInt(nullproc.nullproc), vm.PTE_R | vm.PTE_X | vm.PTE_U, 0);
-    // proc.page_table = try makePageTableForProc(a, proc);
-    // proc.trapframe.epc = riscv.NULLPROC_ADDR;
-    // proc.ctx.ra = @ptrToInt(trap.usertrapret);
-    // var stack_arr = try memalloc.getStack(a, NULLSTK);
-    // var saddr: u64 = @ptrToInt(stack_arr);
-    // try mapProcPageTable(a, NULLPROC, riscv.USER_STACK_TOP, @intCast(usize, saddr), NULLSTK, vm.PTE_R | vm.PTE_W | vm.PTE_U);
-    // proc.ctx.sp = saddr;
     currpid = NULLPROC;
 }
 
@@ -296,6 +276,12 @@ pub fn getPid() Pid {
 
 pub fn getCurrProc() *Process {
     return &proctab[getPid()];
+}
+
+pub fn exitProc(pid: Pid) !void {
+    var pr = &proctab[pid];
+    pr.prstate = ProcStatus.Free;
+    try resched();
 }
 
 pub fn suspendProc(pid: Pid) !usize {
@@ -352,11 +338,12 @@ pub fn makePageTableForProc(a: *Allocator, proc: *Process) !*vm.Table {
 }
 
 pub fn exec(a: *Allocator, name: []u8) !void {
-    const pid = try createProc(a, DEFAULTSTK, DEFAULTPRIO, name, 0);
-    const proc = &proctab[pid];
+    const curr_proc = getCurrProc();
+    const pid = try createProc(a, DEFAULTSTK, curr_proc.prprio + 1, name, 0);
+    var proc = &proctab[pid];
     const entry_addr = try loader.loadExecFile(a, name, proc.page_table);
     proc.trapframe.epc = entry_addr;
-    try uart.out.print("entry: {x}\n", .{entry_addr});
+    // try uart.out.print("entry: {x}\n", .{entry_addr});
     _ = try resumeProc(pid);
 }
 
@@ -392,7 +379,7 @@ pub fn setupProc(a: *Allocator, pid: Pid, stk_size: usize, prio: usize, name: []
     if (name.len >= PNAMELEN) {
         return KernelError.SYSERR;
     }
-    // util.memcpy(@ptrCast([*]u8, &proc.prname[0]), name, name.len);
+
     proc.prname = name;
     proc.prparent = getPid();
 }
@@ -407,31 +394,6 @@ pub fn createProc(a: *Allocator, stk_size: usize, prio: usize, name: []u8, nargs
     }
     var pid = try newPid();
     try setupProc(a, pid, stk_size, prio, name, nargs);
-    // var stack_arr = try memalloc.getStack(a, stack_len);
-    // var saddr: u64 = @ptrToInt(stack_arr);
-
-    // prcount += 1;
-    // var proc = &proctab[pid];
-    // // proc.ctx.ra = func;
-    // var trapframe_ptr = try a.allocAdvanced(u8, 0x1000, 0x1000, Exact.at_least);
-    // proc.trapframe = @ptrCast(*TrapFrame, &trapframe_ptr[0]);
-    // proc.page_table = try makePageTableForProc(a, proc);
-    // try mapProcPageTable(a, pid, riscv.USER_STACK_TOP - stack_len, saddr - stack_len, stack_len, vm.PTE_W | vm.PTE_R | vm.PTE_U);
-    // try vm.map(a, proc.page_table, memlayout.UART_BASE, memlayout.UART_BASE, vm.PTE_R | vm.PTE_W, 0);
-    // proc.ctx.ra = @ptrToInt(trap.usertrapret);
-    // proc.ctx.sp = @ptrToInt(&trap.trap_stack[0]);
-    // proc.trapframe.sp = riscv.USER_STACK_TOP;
-    // proc.prstate = ProcStatus.Susp;
-    // proc.prprio = prio;
-    // proc.prpid = pid;
-    // proc.prstkbase = saddr;
-    // proc.prstklen = stack_len;
-    // if (name.len >= PNAMELEN) {
-    //     trap.restore(mask);
-    //     return KernelError.SYSERR;
-    // }
-    // util.memcpy(@ptrCast([*]u8, &proc.prname[0]), name, name.len);
-    // proc.prparent = getPid();
 
     return pid;
 }
@@ -581,8 +543,7 @@ pub fn resched() !void {
     currpid = new_proc.prpid;
     new_proc.prstate = ProcStatus.Curr;
 
-    // try uart.out.print("Context switch: {} -> {}\n", .{ old_proc.prpid, new_proc.prpid });
-    try uart.out.print("Debug1: resched: old_proc.pid: {}, new_proc.pid: {}, new_proc.ctx.ra: {x}\n", .{ old_proc.prpid, new_proc.prpid, new_proc.ctx.ra });
+    // try uart.out.print("Debug1: resched: old_proc.pid: {}, new_proc.pid: {}, new_proc.ctx.ra: {x}\n", .{ old_proc.prpid, new_proc.prpid, new_proc.ctx.ra });
     swtch(@ptrToInt(&old_proc.ctx), @ptrToInt(&new_proc.ctx));
 }
 

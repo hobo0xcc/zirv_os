@@ -6,9 +6,13 @@
 .set SYS_CREATE_PROC, 6
 .set SYS_SLEEP_PROC, 7
 .set SYS_SUSPEND_PROC, 8
+.set SYS_EXEC, 9
+.set SYS_EXIT, 10
 
 .globl sys_write
 .globl sys_read
+.globl sys_exec
+.globl sys_exit
 sys_write:
     mv a3, a2
     mv a2, a1
@@ -31,4 +35,15 @@ sys_create_proc:
 sys_sleep_proc:
 sys_suspend_proc:
     nop
+    ret
+
+sys_exec:
+    mv a1, a0
+    li a0, SYS_EXEC
+    ecall
+    ret
+
+sys_exit:
+    li a0, SYS_EXIT
+    ecall
     ret

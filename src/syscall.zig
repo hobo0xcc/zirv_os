@@ -6,6 +6,7 @@ const fs = @import("fs.zig");
 const panic = @import("panic.zig").panic;
 const proc = @import("proc.zig");
 const csr = @import("csr.zig");
+const util = @import("util.zig");
 const memalloc = @import("memalloc.zig");
 const Allocator = std.mem.Allocator;
 const KernelError = @import("kerror.zig").KernelError;
@@ -90,6 +91,20 @@ pub const SysCall = struct {
         _ = try proc.suspendProc(@intCast(proc.Pid, pid));
     }
 
+    pub fn sysExec(self: *SysCall, cmd: u64) !void {
+        var page_table = self.getProcPageTable();
+        var cmd_paddr = vm.virtToPhys(page_table, cmd);
+        if (cmd_paddr == null) {
+            panic("cannot translate addr: {x}\n", .{cmd});
+        }
+        const ptr = @intToPtr([*]u8, cmd_paddr.?);
+        try proc.exec(self.a, util.getStrFromCStr(ptr));
+    }
+
+    pub fn sysExit(self: *SysCall) !void {
+        try proc.exitProc(proc.getPid());
+    }
+
     pub fn execSysCall(self: *SysCall, syscall_number: u64, regs: *const SysCallArgs) void {
         _ = switch (syscall_number) {
             1 => {
@@ -115,6 +130,12 @@ pub const SysCall = struct {
             },
             8 => {
                 self.sysSuspendProc(regs.a1) catch {};
+            },
+            9 => {
+                self.sysExec(regs.a1) catch {};
+            },
+            10 => {
+                self.sysExit() catch {};
             },
             else => {
                 panic("unknown syscall: {}\n", .{syscall_number});

@@ -59,3 +59,14 @@ pub fn memcpy(arr: [*]u8, src: [*]u8, size: usize) void {
         arr[i] = src[i];
     }
 }
+
+pub fn strlen(s: [*]u8) usize {
+    var idx: usize = 0;
+    while (s[idx] != 0) : (idx += 1) {}
+
+    return idx;
+}
+
+pub fn getStrFromCStr(s: [*]u8) []u8 {
+    return s[0..strlen(s)];
+}

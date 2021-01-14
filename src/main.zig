@@ -84,6 +84,6 @@ pub fn main() !noreturn {
     var env = try sysinit.init(a);
     memalloc.a = env.a;
     try fs.listAllFiles(env.a, 1);
-    try proc.exec(a, try util.getMutStr(a, "app/hello"));
+    try proc.exec(a, try util.getMutStr(a, "shell"));
     while (true) {}
 }
